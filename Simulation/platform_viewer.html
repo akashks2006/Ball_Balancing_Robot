@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>3-RRS Ball Balancer — Closed-Loop Simulation</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+  /*
+    The theme colors give each mechanical part a distinct visual identity:
+    red for actuated linkages, green for passive linkages, gold for joints,
+    blue for the platform, and red again for the ball. This makes the
+    assembled robot easier to read at a glance during live simulation.
+  */
+  :root {
+    --bg: #0b0d10;
+    --panel: #14171c;
+    --border: #262b33;
+    --text: #d7dbe0;
+    --dim: #7a828e;
+    --link1: #e05a4e;
+    --link2: #4caf6f;
+    --elbow: #e0a13e;
+    --platform: #4e8ee0;
+    --ball: #d63a2e;
+    --warn: #e0d23e;
+    --ok: #4caf6f;
+  }
+  html, body { margin:0; padding:0; height:100%; background:var(--bg); overflow:hidden;
+    font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; }
+  #canvas-wrap { position:fixed; inset:0; cursor:grab; }
+  #canvas-wrap:active { cursor:grabbing; }
+  canvas { display:block; }
+
+  .panel {
+    position:absolute; background: rgba(20,23,28,0.92); border:1px solid var(--border);
+    border-radius:10px; padding:14px 16px; color:var(--text);
+    backdrop-filter: blur(6px); font-size:12px;
+  }
+  .panel h1 { font-size:12px; letter-spacing:0.04em; text-transform:uppercase;
+    color:var(--dim); margin:0 0 12px 0; font-weight:600; }
+
+  #controls { top:16px; left:16px; width:250px; }
+  .btnrow { display:flex; gap:8px; margin-bottom:14px; }
+  button {
+    flex:1; padding:9px 0; background:var(--border); color:var(--text);
+    border:1px solid #363c46; border-radius:6px; font-family:inherit;
+    font-size:12px; cursor:pointer;
+  }
+  button:hover { background:#2b313a; }
+  #forceBtn { border-color:#5a3a35; }
+  #forceBtn:hover { background:#3a2620; }
+
+  .gainrow { margin-bottom:12px; }
+  .gainrow label { display:flex; justify-content:space-between; color:var(--dim); margin-bottom:4px; }
+  .gainrow label span.val { color:var(--text); font-variant-numeric: tabular-nums; }
+  input[type=range] { width:100%; accent-color:#e0a13e; }
+
+  #readout { top:16px; right:16px; width:260px; }
+  #readout .row { display:flex; justify-content:space-between; margin-bottom:6px; color:var(--dim); }
+  #readout .row span.val { color:var(--text); font-variant-numeric: tabular-nums; }
+  #readout .section { margin-top:10px; padding-top:10px; border-top:1px solid var(--border); }
+
+  #bridgeLine { margin-top:12px; padding-top:12px; border-top:1px solid var(--border); }
+  .ok { color:var(--ok); } .bad { color:var(--warn); }
+
+  #recordSection { margin-top:12px; padding-top:12px; border-top:1px solid var(--border); }
+  #recordSection .row { display:flex; justify-content:space-between; margin-bottom:6px; color:var(--dim); }
+  #recordSection .row span.val { color:var(--text); font-variant-numeric: tabular-nums; }
+  #recordBtn.active { background:#5a2e2e; border-color:#7a3a3a; color:#ffb3b3; }
+  #graphSavedPath { font-size:10px; max-width:170px; overflow-wrap:anywhere; text-align:right; }
+
+  #legend {
+    position:absolute; bottom:16px; left:16px; display:flex; gap:12px; flex-wrap:wrap; max-width:600px;
+    background: rgba(20,23,28,0.85); border:1px solid var(--border);
+    border-radius:8px; padding:8px 14px; font-size:11px; color:var(--dim);
+  }
+  #legend .item { display:flex; align-items:center; gap:6px; }
+  #legend .dot { width:9px; height:9px; border-radius:2px; }
+
+  #hint {
+    position:absolute; bottom:16px; right:16px; font-size:11px; color:var(--dim);
+    background: rgba(20,23,28,0.85); border:1px solid var(--border);
+    border-radius:8px; padding:8px 12px; text-align:right; line-height:1.6;
+  }
+</style>
+</head>
+<body>
+
+<!--
+  The page is divided into three layers:
+  1) the full-screen WebGL canvas for the robot model,
+  2) the left-side control panel for tuning gains and issuing commands,
+  3) the right-side telemetry panel that mirrors live state from Python.
+  This keeps the simulation readable while still exposing the controls and
+  data needed to debug the balance loop.
+-->
+<div id="canvas-wrap"></div>
+
+<div id="controls" class="panel">
+  <h1>Control</h1>
+  <div class="btnrow">
+    <button id="forceBtn">Apply Force</button>
+    <button id="resetBtn">Reset to Neutral</button>
+  </div>
+
+  <div class="gainrow">
+    <label>Kp <span class="val" id="kpVal">0</span></label>
+    <input type="range" id="kp" min="0" max="8" value="0" step="0.01">
+  </div>
+  <div class="gainrow">
+    <label>Ki <span class="val" id="kiVal">0</span></label>
+    <input type="range" id="ki" min="0" max="0.8" value="0" step="0.01">
+  </div>
+  <div class="gainrow">
+    <label>Kd <span class="val" id="kdVal">0</span></label>
+    <input type="range" id="kd" min="0" max="2" value="0" step="0.01">
+  </div>
+
+  <div id="recordSection">
+    <div class="btnrow">
+      <button id="recordBtn">Start Recording</button>
+      <button id="saveGraphBtn">Save Graph</button>
+    </div>
+    <div class="row">Recording <span class="val" id="recordStatus">idle</span></div>
+    <div class="row" id="graphSavedRow" style="display:none;">Last save <span class="val" id="graphSavedPath"></span></div>
+  </div>
+
+  <div id="bridgeLine">Bridge: <span id="bridgeStatus" class="bad">connecting…</span></div>
+</div>
+
+<div id="readout" class="panel">
+  <h1>Live State</h1>
+  <div class="row">Ball pos <span class="val" id="ballPos">0.00, 0.00 in</span></div>
+  <div class="row">Ball vel <span class="val" id="ballVel">0.00, 0.00 in/s</span></div>
+
+  <div class="section">
+    <div class="row">PID theta <span class="val" id="pidTheta">0.00°</span></div>
+    <div class="row">PID phi <span class="val" id="pidPhi">0.0°</span></div>
+    <div class="row">Tilt limit <span class="val" id="tiltLimit">ok</span></div>
+  </div>
+
+  <div class="section">
+    <div class="row">Servo 1 <span class="val" id="s1">0.0°</span></div>
+    <div class="row">Servo 2 <span class="val" id="s2">0.0°</span></div>
+    <div class="row">Servo 3 <span class="val" id="s3">0.0°</span></div>
+  </div>
+</div>
+
+<div id="legend">
+  <div class="item"><div class="dot" style="background:var(--link1)"></div>Link 1 (actuated)</div>
+  <div class="item"><div class="dot" style="background:var(--link2)"></div>Link 2 (passive)</div>
+  <div class="item"><div class="dot" style="background:var(--elbow)"></div>Elbow</div>
+  <div class="item"><div class="dot" style="background:var(--platform)"></div>Spherical joint</div>
+  <div class="item"><div class="dot" style="background:var(--ball)"></div>Ball</div>
+</div>
+
+<div id="hint">Drag to rotate · Scroll to zoom<br>Right-drag (or Shift+drag) to pan</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// This viewer no longer computes any kinematics or physics itself. Python
+// (sim_server.py) owns the real robotKinematics.py IK, the PID, and the ball
+// physics — this page only renders whatever state it broadcasts, and sends
+// back button presses / gain-slider changes. Single source of truth.
+// ---------------------------------------------------------------------------
+
+// Fallback visual constants (RESTORED to the earlier mm-scale placeholder
+// dimensions) used only until the first real "dims" payload arrives.
+// These are the default visual dimensions used until the Python server sends
+// the real robot geometry. The viewer intentionally trusts the server as the
+// source of truth for kinematics and physics, while this file only renders it.
+let LP = 60.0, LB = 75.0;
+const BALL_RADIUS = 7.0;
+const BASE_PLATE_THICK = 2.0;
+const PLATFORM_THICK = 1.0;
+
+// Python uses a z-up coordinate system, while Three.js uses y-up. This helper
+// re-maps the coordinates so the rendered model matches the solver math.
+const toThree = p => new THREE.Vector3(p[0], p[2], p[1]);
+
+// ---------------------------------------------------------------------------
+// Three.js scene setup
+// ---------------------------------------------------------------------------
+const wrap = document.getElementById('canvas-wrap');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0d10);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 500);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+wrap.appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const dLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dLight.position.set(20, 30, 15);
+scene.add(dLight);
+const dLight2 = new THREE.DirectionalLight(0x88aaff, 0.25);
+dLight2.position.set(-20, 10, -15);
+scene.add(dLight2);
+
+const grid = new THREE.GridHelper(400, 20, 0x2a2f38, 0x1a1e24);
+scene.add(grid);
+
+// The viewer uses a simple orbit camera so the robot can be inspected from
+// different angles without changing the model itself. Dragging rotates the
+// camera around the target, while right-click or Shift-drag translates the
+// target point to pan the view. Scroll adjusts the zoom distance.
+let camAzimuth = Math.PI * 0.28, camElevation = Math.PI * 0.22, camRadius = 420;
+const camTarget = new THREE.Vector3(0, 90, 0);
+function updateCamera() {
+  const el = Math.max(0.05, Math.min(Math.PI/2 - 0.02, camElevation));
+  camera.position.set(
+    camTarget.x + camRadius * Math.cos(el) * Math.sin(camAzimuth),
+    camTarget.y + camRadius * Math.sin(el),
+    camTarget.z + camRadius * Math.cos(el) * Math.cos(camAzimuth)
+  );
+  camera.lookAt(camTarget);
+}
+updateCamera();
+
+let dragging = false, panning = false, lastX = 0, lastY = 0;
+wrap.addEventListener('mousedown', e => {
+  dragging = true; panning = (e.button === 2 || e.shiftKey);
+  lastX = e.clientX; lastY = e.clientY;
+});
+window.addEventListener('mouseup', () => { dragging = false; panning = false; });
+window.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  const dx = e.clientX - lastX, dy = e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  if (panning) {
+    const panSpeed = camRadius * 0.0016;
+    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+    const up = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
+    camTarget.addScaledVector(right, -dx * panSpeed);
+    camTarget.addScaledVector(up, dy * panSpeed);
+  } else {
+    camAzimuth -= dx * 0.006;
+    camElevation += dy * 0.006;
+  }
+  updateCamera();
+});
+wrap.addEventListener('contextmenu', e => e.preventDefault());
+wrap.addEventListener('wheel', e => {
+  e.preventDefault();
+  camRadius *= (1 + e.deltaY * 0.001);
+  camRadius = Math.max(120, Math.min(1200, camRadius));
+  updateCamera();
+}, { passive: false });
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------------------------------------------------------------------------
+// Scene objects
+// ---------------------------------------------------------------------------
+function makeSphere(color, radius) {
+  const geo = new THREE.SphereGeometry(radius, 20, 16);
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.4, metalness: 0.1 });
+  return new THREE.Mesh(geo, mat);
+}
+function makeLink(color) {
+  const geo = new THREE.CylinderGeometry(3.2, 3.2, 1, 12);
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.15 });
+  return new THREE.Mesh(geo, mat);
+}
+function updateLink(mesh, p1, p2) {
+  const start = toThree(p1), end = toThree(p2);
+  const dir = new THREE.Vector3().subVectors(end, start);
+  const len = Math.max(dir.length(), 0.001);
+  mesh.position.copy(start).addScaledVector(dir, 0.5);
+  mesh.scale.set(1, len, 1);
+  const yAxis = new THREE.Vector3(0, 1, 0);
+  mesh.setRotationFromQuaternion(new THREE.Quaternion().setFromUnitVectors(yAxis, dir.clone().normalize()));
+}
+
+// Base plate: static, never rotates
+const basePlateMat = new THREE.MeshStandardMaterial({ color: 0x3a3f47, roughness: 0.6, metalness: 0.2 });
+const basePlate = new THREE.Mesh(
+  new THREE.CylinderGeometry(LB * 1.15, LB * 1.15, BASE_PLATE_THICK, 50),
+  basePlateMat
+);
+basePlate.position.y = -BASE_PLATE_THICK / 2;
+scene.add(basePlate);
+
+// Platform sheet: rebuilt each frame from the 3 real attachment points
+// (A1, A2, A3) that the server sends — its plane is DERIVED from those
+// points (centroid + normal), not computed separately, so it can never
+// visually disagree with where the joints actually are.
+const platformMat = new THREE.MeshStandardMaterial({
+  color: 0xbcd7f2, transparent: true, opacity: 0.45,
+  roughness: 0.15, metalness: 0.4, side: THREE.DoubleSide
+});
+const platformMesh = new THREE.Mesh(new THREE.BufferGeometry(), platformMat);
+scene.add(platformMesh);
+
+// The platform is not a fixed disk in the scene; it is rebuilt from the three
+// attachment points reported by Python. This ensures the rendered plane always
+// matches the real platform orientation and prevents visual drift from the solver.
+function buildPlatformDiscGeometry(A1, A2, A3, radius, halfThick, segments = 1000) {
+  const p1 = new THREE.Vector3(...A1), p2 = new THREE.Vector3(...A2), p3 = new THREE.Vector3(...A3);
+  const centroid = new THREE.Vector3().addVectors(p1, p2).add(p3).divideScalar(3);
+  let normal = new THREE.Vector3().subVectors(p2, p1).cross(new THREE.Vector3().subVectors(p3, p1)).normalize();
+  if (normal.z < 0) normal.negate();  // keep pointing generally "up" in python z
+
+  // Gram-Schmidt gives a local in-plane basis so the platform can be sampled as
+  // a disc oriented exactly to the actual spherical-joint triangle.
+  let ref = Math.abs(normal.x) < 0.9 ? new THREE.Vector3(1,0,0) : new THREE.Vector3(0,1,0);
+  const u = new THREE.Vector3().crossVectors(ref, normal).normalize();
+  const v = new THREE.Vector3().crossVectors(normal, u).normalize();
+
+  const toWorld = (uu, vv, nn) => {
+    const p = new THREE.Vector3()
+      .addScaledVector(u, uu).addScaledVector(v, vv).addScaledVector(normal, nn)
+      .add(centroid);
+    return toThree([p.x, p.y, p.z]);
+  };
+
+  const topRim = [], botRim = [];
+  for (let i = 0; i < segments; i++) {
+    const t = i / segments * Math.PI * 2;
+    topRim.push(toWorld(radius*Math.cos(t), radius*Math.sin(t), halfThick));
+    botRim.push(toWorld(radius*Math.cos(t), radius*Math.sin(t), -halfThick));
+  }
+  const topCenter = toWorld(0,0,halfThick), botCenter = toWorld(0,0,-halfThick);
+
+  const verts = [];
+  const pushTri = (a,b,c) => verts.push(a.x,a.y,a.z, b.x,b.y,b.z, c.x,c.y,c.z);
+  for (let i = 0; i < segments; i++) {
+    const j = (i+1) % segments;
+    pushTri(topCenter, topRim[i], topRim[j]);
+    pushTri(botCenter, botRim[j], botRim[i]);
+    pushTri(topRim[i], botRim[i], botRim[j]);
+    pushTri(topRim[i], botRim[j], topRim[j]);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  geo.computeVertexNormals();
+  return geo;
+}
+
+// 3 legs: base/elbow/platform spheres + 2 link tubes each
+const legNames = [1, 2, 3];
+const legs = legNames.map(() => ({
+  baseSphere: makeSphere(0x555f6b, 5),
+  elbowSphere: makeSphere(0xe0a13e, 5),
+  platSphere: makeSphere(0x4e8ee0, 5),
+  link1: makeLink(0xe05a4e),
+  link2: makeLink(0x4caf6f),
+}));
+legs.forEach(L => scene.add(L.baseSphere, L.elbowSphere, L.platSphere, L.link1, L.link2));
+
+const ballMesh = makeSphere(0xd63a2e, BALL_RADIUS);
+ballMesh.material.roughness = 0.35;
+scene.add(ballMesh);
+
+// ---------------------------------------------------------------------------
+// UI wiring
+// ---------------------------------------------------------------------------
+const kpInput = document.getElementById('kp'), kpVal = document.getElementById('kpVal');
+const kiInput = document.getElementById('ki'), kiVal = document.getElementById('kiVal');
+const kdInput = document.getElementById('kd'), kdVal = document.getElementById('kdVal');
+const forceBtn = document.getElementById('forceBtn');
+const resetBtn = document.getElementById('resetBtn');
+const bridgeStatus = document.getElementById('bridgeStatus');
+const recordBtn = document.getElementById('recordBtn');
+const saveGraphBtn = document.getElementById('saveGraphBtn');
+const recordStatusEl = document.getElementById('recordStatus');
+const graphSavedRow = document.getElementById('graphSavedRow');
+const graphSavedPath = document.getElementById('graphSavedPath');
+
+function sendGains() {
+  kpVal.textContent = parseFloat(kpInput.value).toFixed(2);
+  kiVal.textContent = parseFloat(kiInput.value).toFixed(2);
+  kdVal.textContent = parseFloat(kdInput.value).toFixed(2);
+  sendMsg({ type: 'gains', kp: parseFloat(kpInput.value), ki: parseFloat(kiInput.value), kd: parseFloat(kdInput.value) });
+}
+[kpInput, kiInput, kdInput].forEach(el => el.addEventListener('input', sendGains));
+forceBtn.addEventListener('click', () => sendMsg({ type: 'force' }));
+resetBtn.addEventListener('click', () => sendMsg({ type: 'reset' }));
+
+// ---------------------------------------------------------------------------
+// Recording + graph export — toggles a recording flag on the server, which
+// logs (t, x, y) samples. "Save Graph" asks the server to render those
+// samples (plus the current Kp/Ki/Kd) into a PNG saved to disk.
+// ---------------------------------------------------------------------------
+let isRecording = false;
+recordBtn.addEventListener('click', () => {
+  sendMsg({ type: isRecording ? 'record_stop' : 'record_start' });
+});
+saveGraphBtn.addEventListener('click', () => {
+  graphSavedRow.style.display = 'none';
+  sendMsg({ type: 'save_graph' });
+});
+
+// ---------------------------------------------------------------------------
+// WebSocket bridge — bidirectional now. Receives full state broadcasts,
+// sends button presses and gain changes.
+// ---------------------------------------------------------------------------
+let ws = null;
+function sendMsg(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+// The browser connects to the Python simulation over a local WebSocket. All
+// state changes (robot geometry, ball position, servo angles, PID values) are
+// pushed from Python, and the page responds only with control inputs such as
+// gain changes, force impulses, and resets.
+function connectBridge() {
+  ws = new WebSocket('ws://localhost:8765');
+  ws.onopen = () => {
+    bridgeStatus.textContent = 'connected';
+    bridgeStatus.className = 'ok';
+    sendGains();  // sync server to whatever the sliders currently show
+  };
+  ws.onclose = () => {
+    bridgeStatus.textContent = 'disconnected (retrying…)';
+    bridgeStatus.className = 'bad';
+    setTimeout(connectBridge, 2000);
+  };
+  ws.onerror = () => { ws.close(); };
+  ws.onmessage = (event) => {
+    const d = JSON.parse(event.data);
+    if (d.type === 'state') applyState(d);
+    else if (d.type === 'record_status') applyRecordStatus(d);
+    else if (d.type === 'graph_saved') applyGraphSaved(d);
+  };
+}
+connectBridge();
+
+// ---------------------------------------------------------------------------
+// Apply a received state broadcast to the scene + readouts
+// ---------------------------------------------------------------------------
+function applyState(d) {
+  LP = d.dims.lp; LB = d.dims.lb;
+
+  const pts = d.points;
+  const legData = [
+    { base: pts.B1, elbow: pts.C1, platform: pts.A1 },
+    { base: pts.B2, elbow: pts.C2, platform: pts.A2 },
+    { base: pts.B3, elbow: pts.C3, platform: pts.A3 },
+  ];
+  legData.forEach((leg, i) => {
+    const L = legs[i];
+    L.baseSphere.position.copy(toThree(leg.base));
+    L.elbowSphere.position.copy(toThree(leg.elbow));
+    L.platSphere.position.copy(toThree(leg.platform));
+    updateLink(L.link1, leg.base, leg.elbow);
+    updateLink(L.link2, leg.elbow, leg.platform);
+  });
+
+  const oldGeo = platformMesh.geometry;
+  platformMesh.geometry = buildPlatformDiscGeometry(pts.A1, pts.A2, pts.A3, LP, PLATFORM_THICK/2);
+  oldGeo.dispose();
+
+  // The Python simulation tracks the ball in 2D plate coordinates (x, y), but the
+  // visualizer has to place the ball in 3D space. We reconstruct the point on the
+  // tilted platform plane where the ball sits, then push it outward by the ball
+  // radius along the plane normal so it appears to rest on the surface instead of
+  // intersecting it.
+  const p1 = new THREE.Vector3(...pts.A1), p2 = new THREE.Vector3(...pts.A2), p3 = new THREE.Vector3(...pts.A3);
+  let normal = new THREE.Vector3().subVectors(p2, p1).cross(new THREE.Vector3().subVectors(p3, p1)).normalize();
+  if (normal.z < 0) normal.negate();
+  const planePoint = p1;
+  // Solve for z on the plane at (x, y): normal · (X - planePoint) = 0
+  const bx = d.ball.x, by = d.ball.y;
+  const bz = planePoint.z - (normal.x*(bx - planePoint.x) + normal.y*(by - planePoint.y)) / normal.z;
+  const surfacePt = [bx, by, bz];
+  const ballCenter = [
+    surfacePt[0] + normal.x * BALL_RADIUS,
+    surfacePt[1] + normal.y * BALL_RADIUS,
+    surfacePt[2] + normal.z * BALL_RADIUS,
+  ];
+  ballMesh.position.copy(toThree(ballCenter));
+
+  // Readouts
+  document.getElementById('ballPos').textContent = `${d.ball.x.toFixed(2)}, ${d.ball.y.toFixed(2)} in`;
+  document.getElementById('ballVel').textContent = `${d.ball.vx.toFixed(2)}, ${d.ball.vy.toFixed(2)} in/s`;
+  document.getElementById('pidTheta').textContent = `${d.pid.theta.toFixed(3)}°`;
+  document.getElementById('pidPhi').textContent = `${d.pid.phi.toFixed(1)}°`;
+  const clamped = d.pid.requested_theta > d.pid.max_theta + 1e-6;
+  const tiltEl = document.getElementById('tiltLimit');
+  tiltEl.textContent = clamped ? 'clamped (at max tilt)' : 'ok';
+  tiltEl.className = clamped ? 'val bad' : 'val ok';
+  document.getElementById('s1').textContent = `${d.servo_deg[0].toFixed(1)}°`;
+  document.getElementById('s2').textContent = `${d.servo_deg[1].toFixed(1)}°`;
+  document.getElementById('s3').textContent = `${d.servo_deg[2].toFixed(1)}°`;
+
+  // Live recording indicator, driven straight off the state broadcast so it
+  // updates every frame while a recording is in progress.
+  if (d.recording && d.recording.active) {
+    recordStatusEl.textContent = `● ${d.recording.elapsed.toFixed(1)}s (${d.recording.samples} pts)`;
+    recordStatusEl.className = 'val bad';
+  } else if (d.recording && !isRecording) {
+    recordStatusEl.className = 'val';
+  }
+}
+
+// Reflects a server-confirmed record_start / record_stop response.
+function applyRecordStatus(d) {
+  isRecording = d.recording;
+  recordBtn.textContent = isRecording ? 'Stop Recording' : 'Start Recording';
+  recordBtn.classList.toggle('active', isRecording);
+  if (!isRecording) {
+    recordStatusEl.textContent = `stopped (${d.samples} pts)`;
+  }
+}
+
+// Reflects the result of a save_graph request.
+function applyGraphSaved(d) {
+  graphSavedRow.style.display = 'flex';
+  if (d.ok) {
+    graphSavedPath.textContent = d.path;
+    graphSavedPath.className = 'val ok';
+  } else {
+    graphSavedPath.textContent = d.error;
+    graphSavedPath.className = 'val bad';
+  }
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+
+</body>
+</html>
