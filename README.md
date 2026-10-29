@@ -1,4 +1,4 @@
-# Ball-Balancing Robot — 3-RRS Stewart Platform
+# Ball-Balancing Robot — 3RRS Stewart Platform
 
 A PID-controlled ball-balancing robot built on a 3-RRS parallel platform. A camera tracks the ball, a PID controller computes the tilt needed to hold it on target, and inverse kinematics turns that tilt into three servo angles.
 
