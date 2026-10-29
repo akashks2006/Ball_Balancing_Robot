@@ -8,7 +8,7 @@ This repo contains both stages of the project:
 - **`Hardware/`**: the final control code running on a Raspberry Pi, with a browser UI for live tuning and calibration.
 
 
-![Demo](/Images/demo.mp4)
+![Demo](/Images/demo.gif)
 
 ---
 
