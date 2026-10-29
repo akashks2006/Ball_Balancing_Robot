@@ -29,7 +29,7 @@ Either layer can be swapped or tuned without touching the other.
 4. Elbow positions (dual sphere-distance constraints)
 5. Servo angles
 
-### Plant model
+### System Model
 
 From the simulation, the ball-on-plate dynamics per axis reduce to:
 
