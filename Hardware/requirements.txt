@@ -1,0 +1,12 @@
+# Hardware dependencies (Raspberry Pi 4)
+# Install with: pip install -r requirements.txt
+#
+# Picamera2 is NOT installed through pip. It ships with Raspberry Pi OS
+# (or: sudo apt install python3-picamera2). If you use a virtual environment,
+# create it with:  python -m venv --system-site-packages venv
+# so the venv can see the system Picamera2.
+
+flask>=2.3
+numpy>=1.24
+opencv-python-headless>=4.8
+adafruit-circuitpython-servokit>=1.3
